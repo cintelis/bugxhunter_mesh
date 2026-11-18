@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1
+#
+# Local source build for bugxhunter_mesh.
+#
+# The stock Dockerfile is runtime-only: it copies a CI-produced binary from
+# dist/<arch>/artex. The upstream autumn27/artex image is deleted, so this
+# multi-stage build compiles everything from the checkout instead — no Go/Node
+# needed on the host, only Docker.
+#
+#   Stage 1 (frontend): Next.js static export  -> web/out
+#   Stage 2 (gobuild):  go build -tags embedui  (embeds server/webui/dist)
+#   Stage 3 (runtime):  mirrors the upstream runtime image (python + recon
+#                       tooling + Playwright), running the freshly built binary.
+
+# ---- Stage 1: frontend static export ----
+FROM node:20-bookworm AS frontend
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build:static   # next build with output:"export" -> /src/web/out
+
+# ---- Stage 2: Go build with embedded UI ----
+FROM golang:1.26-bookworm AS gobuild
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# place the static export where //go:embed all:webui/dist expects it
+COPY --from=frontend /src/web/out/ ./server/webui/dist/
+RUN CGO_ENABLED=0 go build -tags embedui -o /out/artex ./cmd/artex
+
+# ---- Stage 3: runtime (mirrors the stock Dockerfile runtime layers) ----
+FROM python:3.12-slim-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates ripgrep curl wget vim git jq unzip \
+      dnsutils iputils-ping netcat-openbsd inetutils-telnet whois nmap \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install -g @playwright/mcp@latest @playwright/cli@latest playwright@latest \
+    && playwright-cli --help \
+    && playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=gobuild /out/artex /app/artex
+COPY start.sh /app/start.sh
+RUN chmod +x /app/artex /app/start.sh
+COPY skills/ /app/skills/
+VOLUME ["/app/data"]
+EXPOSE 8787 8788
+ENTRYPOINT ["/app/start.sh"]
+CMD ["-addr", ":8787", "-proxy", ":8788"]

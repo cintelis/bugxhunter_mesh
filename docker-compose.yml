@@ -15,7 +15,10 @@ services:
     restart: unless-stopped
 
   artex:
-    image: autumn27/artex:${ARTEX_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    image: bugxhunter_mesh:local
     depends_on:
       postgres:
         condition: service_healthy
